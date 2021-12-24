@@ -109,6 +109,31 @@ extern "C"
   LIB_PRIVATE int dmtcp_tkill(int tid, int sig);
   LIB_PRIVATE int dmtcp_tgkill(int tgid, int tid, int sig);
 
+// FIXME:  We must support glibc versions post-33 and pre-33 for now.
+//         Eventually, we should remove the xstat macros and support
+//         only the stat family that is defined in glibc-33 and later.
+// glibc version 2.33 and later stopped defining _STAT_VER (for the 'vers'
+// argument of the xstat family of functions), and stopped
+// defining the xstat family.  It now defines the stat family directly.
+// instead of defining stat as a macro that expands to __xstat, etc.
+// We are macro expanding the xstat family to the stat family,
+// whenever _STAT_VER not defined..
+#ifndef _STAT_VER
+# undef __xstat
+# undef __xstat64
+# undef __lxstat
+# undef __lxstat64
+# define __xstat(vers,path,buf)         stat(path,buf)
+# define __xstat64(vers,path,buf)       stat64(path,buf)
+# define __lxstat(vers,path,buf)        lstat(path,buf)
+# define __lxstat64(vers,path,buf)      lstat64(path,buf)
+# define _real_xstat(vers,path,buf)     _real_stat(path,buf)
+# define _real_xstat64(vers,path,buf)   _real_stat64(path,buf)
+# define _real_lxstat(vers,path,buf)    _real_lstat(path,buf)
+# define _real_lxstat64(vers,path,buf)  _real_lstat64(path,buf)
+#endif 
+
+#ifdef _STAT_VER
 #define FOREACH_PIDVIRT_WRAPPER(MACRO)\
   MACRO(fork)               \
   MACRO(__clone)            \
@@ -155,6 +180,54 @@ extern "C"
   MACRO(__lxstat)           \
   MACRO(__lxstat64)         \
   MACRO(readlink)
+#else
+#define FOREACH_PIDVIRT_WRAPPER(MACRO)\
+  MACRO(fork)               \
+  MACRO(__clone)            \
+  MACRO(gettid)             \
+  MACRO(tkill)              \
+  MACRO(tgkill)             \
+  MACRO(syscall)            \
+  MACRO(shmget)             \
+  MACRO(shmat)              \
+  MACRO(shmdt)              \
+  MACRO(mq_notify)          \
+  MACRO(clock_getcpuclockid)\
+  MACRO(timer_create)       \
+  MACRO(getppid)            \
+  MACRO(tcgetsid)           \
+  MACRO(tcgetpgrp)          \
+  MACRO(tcsetpgrp)          \
+  MACRO(getpgrp)            \
+  MACRO(setpgrp)            \
+  MACRO(getpgid)            \
+  MACRO(setpgid)            \
+  MACRO(getsid)             \
+  MACRO(setsid)             \
+  MACRO(kill)               \
+  MACRO(wait)               \
+  MACRO(waitpid)            \
+  MACRO(waitid)             \
+  MACRO(wait3)              \
+  MACRO(wait4)              \
+  MACRO(ioctl)              \
+  MACRO(setgid)             \
+  MACRO(setuid)             \
+  MACRO(ptrace )            \
+  MACRO(pthread_exit )      \
+  MACRO(fcntl)              \
+  MACRO(open)               \
+  MACRO(open64)             \
+  MACRO(close)              \
+  MACRO(dup2)               \
+  MACRO(fopen64)            \
+  MACRO(opendir)            \
+  MACRO(stat)               \
+  MACRO(stat64)             \
+  MACRO(lstat)              \
+  MACRO(lstat64)            \
+  MACRO(readlink)
+#endif
 
 #define FOREACH_SYSVIPC_CTL_WRAPPER(MACRO)\
   MACRO(shmctl)             \

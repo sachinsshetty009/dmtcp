@@ -43,7 +43,14 @@ static pthread_mutex_t tblLock = PTHREAD_MUTEX_INITIALIZER;
 
 static int roundingMode = -1;
 static fenv_t envp;
+static rlim_t rlim_cur_as = 0;
+static rlim_t rlim_cur_core = 0;
+static rlim_t rlim_cur_cpu = 0;
+static rlim_t rlim_cur_data = 0;
+static rlim_t rlim_cur_fsize = 0;
+static rlim_t rlim_cur_nice = 0;
 static rlim_t rlim_cur_nofile = 0;
+static rlim_t rlim_cur_nproc = 0;
 static rlim_t rlim_cur_stack = 0;
 
 static void _do_lock_tbl()
@@ -88,19 +95,23 @@ void dmtcp_ProcessInfo_EventHook(DmtcpEvent_t event, DmtcpEventData_t *data)
       fesetround(roundingMode);
 
       { struct rlimit rlim = {0, 0};
-        getrlimit(RLIMIT_NOFILE, &rlim);
-        JWARNING(rlim_cur_nofile <= rlim.rlim_max)
-          (rlim_cur_nofile) (rlim.rlim_max)
-          .Text("Prev. soft limit of RLIMIT_NOFILE lowered to new hard limit");
-        rlim.rlim_cur = rlim_cur_nofile;
-        JASSERT(setrlimit(RLIMIT_NOFILE, &rlim) == 0);
 
-        getrlimit(RLIMIT_STACK, &rlim);
-        JWARNING(rlim_cur_stack <= rlim.rlim_max)
-          (rlim_cur_stack) (rlim.rlim_max)
-          .Text("Prev. soft limit of RLIMIT_STACK lowered to new hard limit");
-        rlim.rlim_cur = rlim_cur_stack;
-        JASSERT(setrlimit(RLIMIT_STACK, &rlim) == 0);
+#define RESTORE_RLIMIT(_RLIMIT,_rlim_cur) \
+        getrlimit(_RLIMIT, &rlim); \
+        JWARNING(_rlim_cur <= rlim.rlim_max) (_rlim_cur) (rlim.rlim_max) \
+          .Text("Prev. soft limit of " #_RLIMIT " lowered to new hard limit"); \
+        rlim.rlim_cur = _rlim_cur; \
+        JASSERT(setrlimit(_RLIMIT, &rlim) == 0);
+
+        RESTORE_RLIMIT(RLIMIT_AS, rlim_cur_as);
+        RESTORE_RLIMIT(RLIMIT_CORE, rlim_cur_core);
+        RESTORE_RLIMIT(RLIMIT_CPU, rlim_cur_cpu);
+        RESTORE_RLIMIT(RLIMIT_DATA, rlim_cur_data);
+        RESTORE_RLIMIT(RLIMIT_FSIZE, rlim_cur_fsize);
+        RESTORE_RLIMIT(RLIMIT_NICE, rlim_cur_nice);
+        RESTORE_RLIMIT(RLIMIT_NOFILE, rlim_cur_nofile);
+        RESTORE_RLIMIT(RLIMIT_NPROC, rlim_cur_nproc);
+        RESTORE_RLIMIT(RLIMIT_STACK, rlim_cur_stack);
       }
       ProcessInfo::instance().restart();
       break;
@@ -116,11 +127,19 @@ void dmtcp_ProcessInfo_EventHook(DmtcpEvent_t event, DmtcpEventData_t *data)
       fegetenv(&envp);
 
       { struct rlimit rlim = {0, 0};
-        getrlimit(RLIMIT_NOFILE, &rlim);
-        rlim_cur_nofile = rlim.rlim_cur;
+#define SAVE_RLIMIT(_RLIMIT,_rlim_cur) \
+        getrlimit(_RLIMIT, &rlim); \
+        _rlim_cur = rlim.rlim_cur;
 
-        getrlimit(RLIMIT_STACK, &rlim);
-        rlim_cur_stack = rlim.rlim_cur;
+        SAVE_RLIMIT(RLIMIT_AS, rlim_cur_as);
+        SAVE_RLIMIT(RLIMIT_CORE, rlim_cur_core);
+        SAVE_RLIMIT(RLIMIT_CPU, rlim_cur_cpu);
+        SAVE_RLIMIT(RLIMIT_DATA, rlim_cur_data);
+        SAVE_RLIMIT(RLIMIT_FSIZE, rlim_cur_fsize);
+        SAVE_RLIMIT(RLIMIT_NICE, rlim_cur_nice);
+        SAVE_RLIMIT(RLIMIT_NOFILE, rlim_cur_nofile);
+        SAVE_RLIMIT(RLIMIT_NPROC, rlim_cur_nproc);
+        SAVE_RLIMIT(RLIMIT_STACK, rlim_cur_stack);
       }
       break;
 
@@ -251,9 +270,27 @@ void ProcessInfo::init()
   // Reserve space for restoreBuf
   _restoreBufLen = RESTORE_TOTAL_SIZE;
 
-  _restoreBufAddr = (uint64_t) mmap(NULL, _restoreBufLen, PROT_NONE,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  JASSERT(_restoreBufLen != (uint64_t) MAP_FAILED) (JASSERT_ERRNO);
+  int pagesize = getpagesize();
+  _restoreBufAddr = (uint64_t) mmap(NULL, _restoreBufLen + 2*pagesize,
+                    PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  JASSERT(_restoreBufAddr != (uint64_t) MAP_FAILED) (JASSERT_ERRNO);
+  _restoreBufAddr = (uint64_t)(_restoreBufAddr + pagesize);
+  // Guard page _restoreBufAddr; prevent kernel from merging regions
+  // Note that PROT_READ was added to 'mprotect' on the guard pages.
+  //   Before adding this, test/{dmtcp5,sched_test,shared-fd1}, and others
+  //   were failing during the _first_ checkpoint, only.  The checkpoint
+  //   image was malformed because write() of these guard pages
+  //   was failing with EFAULT (although no SEGFAULT occurred) when trying to
+  //   read the guard pages and write them to the checkpoint image.
+  //   This occurred in Linux 3.10.0-1062.9.1.el7.x86_64 in CentOS 7.7.1908.
+  //   (But it did not occur in Ubuntu 18.04 with Linux 4.15.)
+  //   This is arguably a bug in the Linux 3.10 kernel.
+  mprotect((char *)_restoreBufAddr - pagesize, pagesize,
+           PROT_READ | PROT_EXEC);
+  JASSERT(_restoreBufLen % pagesize == 0) (_restoreBufLen) (pagesize);
+  mprotect((char *)_restoreBufAddr + _restoreBufLen, pagesize,
+           PROT_READ | PROT_EXEC);
+
 
   if (_ckptDir.empty()) {
     updateCkptDirFileSubdir();
@@ -381,7 +418,7 @@ void ProcessInfo::restoreHeap()
 void ProcessInfo::restart()
 {
   // Unmap the restore buffer and remap it with PROT_NONE. We do munmap followed
-  // mmap to ensure that the kernel releases the backing physical pages.
+  // by mmap to ensure that the kernel releases the backing physical pages.
   JASSERT(munmap((void *)_restoreBufAddr, _restoreBufLen) == 0)
     ((void *)_restoreBufAddr) (_restoreBufLen) (JASSERT_ERRNO);
 

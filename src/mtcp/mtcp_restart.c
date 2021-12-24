@@ -462,11 +462,13 @@ static void restart_fast_path()
                 CLEAN_FOR_64_BIT(sub %0, %%ebp; )
                 : : "r" (rinfo.stack_offset) : "memory");
 
-#elif defined(__arm__) || defined(__aarch64__)
-  asm volatile ("sub sp, sp, %0; mov fp, fp, %0 \n\t"
+#elif defined(__aarch64__)
+  // Use x29 instead of fp because GCC's inline assembler does not recognize fp.
+  asm volatile ("sub sp, sp, %0\n\t"
+                "sub x29, x29, %0"
                 : : "r" (rinfo.stack_offset) : "memory");
 
-#else /* if defined(__i386__) || defined(__x86_64__) */
+#else /* if defined(__i386__) || defined(__x86_64__) || ... */
 
 # error "assembly instruction not translated"
 
@@ -1118,9 +1120,18 @@ void restore_libc(ThreadTLSInfo *tlsInfo, int tls_pid_offset,
   }
 
   /* Now pass this to the kernel, so it can adjust the segment descriptor.
-   *   tls_set_thread_areaa() uses arg1 for fs and arg2 for gs.
+   *   i386, x86_65: tls_set_thread_areaa() uses arg1 for fs and arg2 for gs.
    * This will make different kernel calls according to the CPU architecture. */
-  if (tls_set_thread_area (&(tlsInfo->gdtentrytls[0]), &(tlsInfo->gdtentrytls[1])) != 0) {
+#if defined(__i386__) || defined(__x86_64__)
+  if (tls_set_thread_area (&(tlsInfo->gdtentrytls[0]), &(tlsInfo->gdtentrytls[1])) != 0)
+#elif defined(__arm__) || defined(__aarch64__)
+  // FIXME: ARM uses tls_get_thread_area with incompatible syntax,
+  //        setting global variable myinfo_gs.  Fix this to work
+  //        for per-thread storage (multiple threads).
+  //        See commit 591a1631 (2.6.0), 7d02a2e0 (3.0):  PR #609
+  if (tls_set_thread_area (&(tlsInfo->gdtentrytls[0]), myinfo_gs) != 0)
+#endif
+  {
     MTCP_PRINTF("Error restoring GDT TLS entry; errno: %d\n", mtcp_sys_errno);
     mtcp_abort();
   }
@@ -1284,7 +1295,7 @@ remapMtcpRestartToReservedArea(RestoreInfo *rinfo)
     mtcp_sys_mmap(new_stack_start_addr,
                   rinfo->old_stack_size,
                   PROT_READ | PROT_WRITE,
-                  MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED | MAP_GROWSDOWN,
+                  MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
                   -1,
                   0);
   MTCP_ASSERT(rinfo->new_stack_addr != MAP_FAILED);
